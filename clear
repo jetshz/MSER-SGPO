@@ -1,0 +1,98 @@
+import numpy as np
+import torch
+from torch.backends import cudnn
+from torch.utils.data import DataLoader
+import torchvision
+from torchvision import transforms
+import torch.nn.functional as F
+import argparse
+import torchvision.models as models
+from self_model import resnet_50_prm
+from self_data import data
+from self_tool import torchutils, pyutils
+import PIL.Image
+from nest import modules
+import json
+from scipy.misc import imresize
+
+import argparse
+import numpy as np
+import time
+import os
+import shutil
+
+import chainercv
+from chainercv.datasets import VOCInstanceSegmentationDataset
+
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--save_path", default = "/home/zxforchid/Hu_Z/pychram_PRM/clear_image", type= str)
+parser.add_argument("--num_workers", default = 1 ,type = int)
+parser.add_argument("--prm_weights1", default = "/home/zxforchid/Hu_Z/pychram_PRM/PRM_origin_times.pth", type = str)
+parser.add_argument("--prm_weights2", default = "/home/zxforchid/Hu_Z/pychram_PRM/PRM_clear_30.pth", type = str)
+parser.add_argument("--prm_weights3", default = "/home/zxforchid/Hu_Z/pychram_PRM/PRM_clear_35_peak.pth", type = str)
+parser.add_argument("--infer_list", default="/home/zxforchid/Hu_Z/PRM-pytorch/demo/datasets/VOCdevkit/VOC2012/ImageSets/Main/trainval.txt", type=str)
+parser.add_argument("--saliency", default = "/home/zxforchid/Hu_Z/PRM-pytorch/saliency_R3Net", type = str)
+parser.add_argument("--voc12_root", default="/home/zxforchid/Hu_Z/PRM-pytorch/demo/datasets/VOCdevkit/VOC2012", type = str)
+parser.add_argument("--out__root", default = "/home/zxforchid/Hu_Z/PRM-pytorch/demo/datasets/VOCdevkit/VOC2012", type = str)
+args = parser.parse_args()
+
+
+
+backbone1 = resnet_50_prm.ResNet50()
+model1 = resnet_50_prm.Peak_Response_Map(backbone1)
+
+transformer = transforms.Compose([
+    transforms.Resize((448, 448)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+])
+
+model1 = torch.nn.DataParallel(model1)
+weights1 = torch.load(args.prm_weights1)
+model1 = model1.module.cuda()
+model1.load_state_dict(weights1)
+model1.eval()
+model1.inference()
+
+
+infer_dataset = data.VOC12ImageDataset(args.infer_list, voc12_root = args.voc12_root,
+                                     transform = transformer)
+
+infer_data_loader = DataLoader(infer_dataset, shuffle = False, num_workers=args.num_workers, pin_memory = True)
+
+for _, pack in enumerate(infer_data_loader):
+    img_name = pack[0][0]
+    size = (pack[2][1], pack[2][0])
+    print(img_name)
+    clear_mask = np.zeros(size, dtype = np.uint8)
+    img = pack[1].cuda().requires_grad_()
+    image = imresize(pack[1].squeeze().numpy(), size, interp='bilinear')
+    instance_list1 = model1(img)
+    # instance_list1 = os.path.exists("%s/MAKE1/%s/1.npy" % (args.save_path, img_name))
+    if instance_list1 is not None:
+    # if instance_list1:
+        _1, class_response_maps_1, peak_list_1, peak_response_map_1 = instance_list1
+        peak_response_map_1 = peak_response_map_1.cpu().numpy()
+        peak_list_1 = peak_list_1.cpu().numpy()
+        cr_1 = class_response_maps_1.squeeze().cpu().numpy()
+        for i in range(len(peak_response_map_1)):
+
+            clear = imresize(peak_response_map_1[i], size, interp='bilinear')
+            mask = clear > 30
+            image[mask, 0] = 0
+            image[mask, 1] = 0
+            image[mask, 2] = 0
+            clear_mask[mask] = 255
+        image_clear = PIL.Image.fromarray(image)
+        image_clear_mask = PIL.Image.fromarray(clear_mask)
+        image_clear_mask.save("%s/clear_mask/%s.png" % (args.save_path, img_name))
+        image_clear.save("%s/clear/%s.png" % (args.save_path, img_name))
+
+
+
+
+
+
+

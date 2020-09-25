@@ -1,0 +1,471 @@
+
+import torch
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from self_model import resnet_50_prm
+from self_data import data
+import PIL.Image
+from nest import modules
+import json
+from scipy.misc import imresize
+
+import argparse
+import numpy as np
+import time
+import os
+import shutil
+
+import chainercv
+from chainercv.datasets import VOCInstanceSegmentationDataset
+
+def run(args):
+    dataset = VOCInstanceSegmentationDataset(split=args.chainer_eval_set, data_dir=args.voc12_root)
+    gt_masks = [dataset.get_example_by_keys(i, (1,))[0] for i in range(len(dataset))]
+    gt_labels = [dataset.get_example_by_keys(i, (2,))[0] for i in range(len(dataset))]
+
+    pred_class = []
+    pred_mask = []
+    pred_score = []
+    for id in dataset.ids:
+        if os.path.exists(os.path.join(args.ins_seg_out_dir, id + '.npy')):
+            ins_out = np.load(os.path.join(args.ins_seg_out_dir, id + '.npy'), allow_pickle=True).item()
+            pred_class.append(ins_out['class'])
+            pred_mask.append(ins_out['mask'])
+            pred_score.append(ins_out['score'])
+        else:
+            pred_class.append(None)
+            pred_mask.append(None)
+            pred_score.append(None)
+
+    a = chainercv.evaluations.eval_instance_segmentation_voc(pred_mask, pred_class, pred_score,
+                                                         gt_masks, gt_labels, iou_thresh=0.25)
+
+    b = chainercv.evaluations.eval_instance_segmentation_voc(pred_mask, pred_class, pred_score,
+                                                                          gt_masks, gt_labels, iou_thresh=0.5)
+
+    c = chainercv.evaluations.eval_instance_segmentation_voc(pred_mask, pred_class, pred_score,
+                                                                          gt_masks, gt_labels, iou_thresh=0.75)
+
+    d = chainercv.evaluations.calc_instance_segmentation_voc_ABO(pred_mask, pred_class, pred_score,
+                                                                 gt_masks, gt_labels)
+
+    print('0.25iou:', a)
+    print('0.5iou:', b)
+    print('0.75iou:', c)
+    print('abo:', d)
+    return a,b,c,d
+
+cmap = [0,0,0,128,0,0,0,128,0,128,128,0,0,0,128,128,0,128,0,128,128,128,128,128,64,0,0,192,0,0,64,128,0,192,128,0,64,0,128,
+            192,0,128,64,128,128,192,128,128,0,64,0,128,64,0,0,192,0,128,192,0,0,64,128]
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--save_path", default = "/home/zxforchid/Hu_Z/pychram_PRM/COB_test_1", type= str)
+parser.add_argument("--num_workers", default = 8 ,type = int)
+parser.add_argument("--prm_weights1", default = "/home/zxforchid/Hu_Z/pychram_PRM/PRM_origin_times.pth", type = str)
+parser.add_argument("--prm_weights2", default = "/home/zxforchid/Hu_Z/pychram_PRM/PRM_clear_30.pth", type = str)
+parser.add_argument("--prm_weights3", default = "/home/zxforchid/Hu_Z/pychram_PRM/PRM_clear_35_peak.pth", type = str)
+parser.add_argument("--infer_list", default="/home/zxforchid/Hu_Z/PRM-pytorch/demo/datasets/VOCdevkit/VOC2012/ImageSets/Segmentation/val.txt", type=str)
+parser.add_argument("--saliency", default = "/home/zxforchid/Hu_Z/PRM-pytorch/saliency_R3Net", type = str)
+parser.add_argument("--voc12_root", default="/home/zxforchid/Hu_Z/PRM-pytorch/demo/datasets/VOCdevkit/VOC2012", type = str)
+parser.add_argument("--out__root", default = "/home/zxforchid/Hu_Z/PRM-pytorch/demo/datasets/VOCdevkit/VOC2012", type = str)
+args = parser.parse_args()
+
+
+
+backbone1 = resnet_50_prm.ResNet50()
+model1 = resnet_50_prm.Peak_Response_Map(backbone1)
+
+backbone2 = resnet_50_prm.ResNet50()
+model2 = resnet_50_prm.Peak_Response_Map(backbone2)
+
+backbone3 = resnet_50_prm.ResNet50()
+model3 = resnet_50_prm.Peak_Response_Map(backbone3)
+
+transformer = transforms.Compose([
+    transforms.Resize((448, 448)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+])
+
+model1 = torch.nn.DataParallel(model1)
+weights1 = torch.load(args.prm_weights1)
+model1 = model1.module.cuda()
+model1.load_state_dict(weights1)
+model1.eval()
+model1.inference()
+
+model2 = torch.nn.DataParallel(model2)
+weights2 = torch.load(args.prm_weights2)
+model2 = model2.module.cuda()
+model2.load_state_dict(weights2)
+model2.eval()
+model2.inference()
+
+# model3 = torch.nn.DataParallel(model3)
+# weights3 = torch.load(args.prm_weights3)
+# model3 = model3.module.cuda()
+# model3.load_state_dict(weights3)
+# model3.eval()
+# model3.inference()
+
+proposal_count = 100
+
+infer_dataset = data.VOC12ImageDataset(args.infer_list, voc12_root = args.voc12_root,
+                                     transform = transformer)
+
+infer_data_loader = DataLoader(infer_dataset, shuffle = False, num_workers=args.num_workers, pin_memory = True)
+
+starttime = time.time()
+para_list = [[2.0357567999999966, 4.909211999999996e-05, 0.47286306996389904, 39.651897599999934],
+             [6.5940011089919865, 1.666499999999999e-05, 0.7319999999999988, 1.289131199999996],
+             [5.403072729599996, 1.0327499999999994e-05, 0.5114577379999989, 1.524095999999995],
+             [6.674399999999992, 3.3599999999999987e-06, 0.4895999999999991, 3.0006456479999914],
+             [1.4717894399999973, 3.333149999999999e-05, 0.4226258220799992, 19.955135692799953],
+             [1.8095615999999977, 1.0779999999999992e-05, 0.9037599999999981, 4.520879999999988],
+             [1.333199999999997, 1.589999999999999e-05, 1.1023139999999976, 5.249243999999987],
+             [2.8105649999999964, 1.649999999999999e-05, 1.6321599999999963, 6.803999999999982],
+             [2.2844410143609557, 1.1423999999999993e-05, 1.1380786724999976, 0.790548595199998],
+             [2.783362459499997, 2.2949999999999992e-05, 1.1682467999999977, 2.7885311999999924],
+             [0.8052442675199982, 1.199999999999999e-05, 3.9102039325439946, 9.525599999999976],
+             [0.967199999999998, 2.4233999999999992e-05, 0.6761999999999988, 4.58419499999999],
+             [1.035845495999998, 7.006499999999992e-06, 0.38559779999999916, 0.9103933439999972],
+             [1.3229999999999975, 1.199999999999999e-05, 0.9879999999999978, 1.8942335999999944],
+             [1.0333439999999974, 3.0491999999999975e-05, 0.6163141944959988, 1.2236571647999968],
+             [1.4079743999999972, 3.142619999999999e-05, 0.09597760502399981, 0.7418537279999976],
+             [0.9738959999999982, 1.4718599999999992e-05, 0.4366252799999993, 1.5744959999999955],
+             [0.7016090399999986, 4.5701711999999976e-05, 2.0460803219999963, 1.122555033599997],
+             [5.266614599999997, 2.159999999999999e-05, 3.940120799999995, 61.29723599999991],
+             [2.496614399999995, 2.3399999999999986e-05, 1.1998799999999978, 5.002905599999986]]
+shutil.rmtree("%s/1" % (args.save_path))
+os.mkdir("%s/1" % (args.save_path))
+
+
+for _, pack in enumerate(infer_data_loader):
+    img_name = pack[0][0]
+    print(img_name)
+    # os.mkdir("/home/zxforchid/Hu_Z/pychram_PRM/COB_test/test_2/%s" % (img_name))
+    # os.mkdir("%s/MAKE1/%s" % (args.save_path, img_name))
+    # os.mkdir("%s/MAKE3/%s" % (args.save_path, img_name))
+    # os.mkdir("%s/MAKE2/%s" % (args.save_path, img_name))
+    img = pack[1].cuda().requires_grad_()
+
+    saliency_map = np.array(PIL.Image.open("%s/%s.png" % (args.saliency, img_name)))
+    with open("/home/zxforchid/Hu_Z/PRM-pytorch/demo/cob_data_json/%s.json" % (img_name), 'r') as f:
+        proposals = list(map(modules.rle_decode, json.load(f)))
+    saliency = PIL.Image.open("%s/%s.png" % (args.saliency, img_name))
+    saliency = np.array(saliency)
+
+    instance_list1 = model1(img)
+    # instance_list1 = os.path.exists("%s/MAKE1/%s/1.npy" % (args.save_path, img_name))
+    if instance_list1 is not None:
+    # if instance_list1:
+        _1, class_response_maps_1, peak_list_1, peak_response_map_1 = instance_list1
+        peak_response_map_1 = peak_response_map_1.cpu().numpy()
+        peak_list_1 = peak_list_1.cpu().numpy()
+        cr_1 = class_response_maps_1.squeeze().cpu().numpy()
+
+        # np.save("%s/MAKE1/%s/1.npy"% (args.save_path,img_name),cr)
+        # np.save("%s/MAKE1/%s/2.npy" % (args.save_path, img_name), peak_response_map_1)
+        # np.save("%s/MAKE1/%s/3.npy" % (args.save_path, img_name), peak_list_1)
+
+        # class_response_maps_1 = np.load("%s/MAKE1/%s/1.npy" % (args.save_path, img_name))
+        # peak_list_1 = np.load("%s/MAKE1/%s/3.npy" % (args.save_path, img_name))
+        # peak_response_map_1 = np.load("%s/MAKE1/%s/2.npy" % (args.save_path, img_name))
+        # class_response_maps_1 = torch.from_numpy(class_response_maps_1).cuda()
+
+        #sum_1 = model1.instance_seg(cr_1, torch.from_numpy(peak_list_1).cuda(),
+                                    #torch.from_numpy(peak_response_map_1).cuda(),
+                                    #dict(proposals=proposals, proposal_count = proposal_count, param=(0.95, 1e-5, 0.8, 3e-6),
+                                         #saliency_map=saliency_map))
+        #vis = modules.prm_visualize(sum_1, class_names=data.CAT_LIST)
+        #prm = PIL.Image.fromarray(imresize(vis[1], (pack[2][1], pack[2][0]), interp='bilinear'))
+        #prm.save("%s/prm_1/%s.png" % (args.save_path, img_name))
+
+
+        img2 = img.detach().squeeze().cpu().numpy()
+########################--- clear ---############################
+        for i in range(len(peak_response_map_1)):
+            mask = peak_response_map_1[i]
+            mask = imresize(mask, (448,448), interp='nearest')
+            mask = mask > 30
+            for j in range(3):
+                img2[j, mask] = 0
+#################################################################
+
+        img2 = torch.from_numpy(img2).unsqueeze(0).cuda().requires_grad_()
+    else:
+        #none_picture = PIL.Image.fromarray(np.zeros((pack[2][1], pack[2][0])).astype('uint8'))
+        #none_picture.save("%s/prm_1/%s.png" % (args.save_path, img_name))
+        img2 = PIL.Image.open("/home/zxforchid/Hu_Z/PRM-pytorch/demo/datasets/VOCdevkit/VOC2012/JPEGImages/%s.jpg" % (img_name))
+        img2 = transformer(img2).unsqueeze(0).cuda().requires_grad_()
+    peak_list_sum = []
+    peak_response_map_sum = []
+    class_response_maps_sum = []
+    if instance_list1 is not None:
+        #########################-- three --#############################
+        img3 = img.detach().squeeze().cpu().numpy()
+        img3 = torch.from_numpy(img3).unsqueeze(0).cuda().requires_grad_()
+        #################################################################
+        for i in range(len(peak_response_map_1)):
+            peak_list_sum.append(peak_list_1[i])
+            peak_response_map_sum.append(peak_response_map_1[i])
+            class_response_maps_sum.append(cr_1)
+    else:
+        #########################-- three --#############################
+        #################################################################
+        peak_list_sum = None
+        peak_response_map_sum = None
+    instance_list2 = model2(img2)
+    # instance_list2 = os.path.exists("%s/MAKE2/%s/1.npy" % (args.save_path, img_name))
+
+    peak_list_sum = []
+    peak_response_map_sum = []
+    class_response_maps_sum=[]
+    if instance_list2 is not None:
+    # if instance_list2:
+        _1, class_response_maps_2, peak_list_2, peak_response_map_2 = instance_list2
+        peak_response_map_2 = peak_response_map_2.cpu().numpy()
+        peak_list_2 = peak_list_2.cpu().numpy()
+        cr_2 = class_response_maps_2.squeeze().cpu().numpy()
+        # np.save("%s/MAKE2/%s/1.npy" % (args.save_path, img_name), cr)
+        # np.save("%s/MAKE2/%s/2.npy" % (args.save_path, img_name), peak_response_map_2)
+        # np.save("%s/MAKE2/%s/3.npy" % (args.save_path, img_name), peak_list_2)
+
+        # class_response_maps_2 = np.load("%s/MAKE2/%s/1.npy" % (args.save_path, img_name))
+        # peak_list_2 = np.load("%s/MAKE2/%s/3.npy" % (args.save_path, img_name))
+        # peak_response_map_2 = np.load("%s/MAKE2/%s/2.npy" % (args.save_path, img_name))
+        # class_response_maps_2 = torch.from_numpy(class_response_maps_2).cuda()
+
+
+        #sum_2 = model2.instance_seg(cr_2, torch.from_numpy(peak_list_2).cuda(), torch.from_numpy(peak_response_map_2).cuda(),
+                                       #dict(proposals=proposals, proposal_count = proposal_count , param=(0.95, 1e-5, 0.8, 3e-6),
+                                            #saliency_map=saliency_map))
+        #vis = modules.prm_visualize(sum_2, class_names=data.CAT_LIST)
+        #prm = PIL.Image.fromarray(imresize(vis[1], (pack[2][1], pack[2][0]), interp='bilinear'))
+        #prm.save("%s/prm_2/%s.png" % (args.save_path, img_name))
+        #########################-- three --#############################
+        img3 = img2.detach().squeeze().cpu().numpy()
+        for i in range(len(peak_response_map_2)):
+            mask = (peak_response_map_2[i]-peak_response_map_2[i].min())/(peak_response_map_2[i].max()-peak_response_map_2[i].min())*255
+            for j in range(3):
+                img3[j, mask > 30] = 0
+        img3 = torch.from_numpy(img3).unsqueeze(0).cuda().requires_grad_()
+        #################################################################
+        if instance_list1 is not None:
+#########################--- PRM ---#############################
+            # # count =0
+            # i = 0
+            # j = 0
+            # while i < len(peak_response_map_2):
+            #     while j < len(peak_response_map_1):
+            #         mask_1 = peak_response_map_1[j]>peak_response_map_1[j].mean()*ls
+            #         mask_2 = peak_response_map_2[i]>peak_response_map_2[i].mean()*ls
+            #         mask_sum = mask_1*mask_2
+            #         # mas_abs = mask_1*mask_2
+            #         # asd=np.squeeze(peak_response_map_1[j]*[mas_abs]+peak_response_map_2[i]*[mas_abs])
+            #         num = (peak_response_map_1[j][mask_1*mask_2].sum()+peak_response_map_2[i][mask_1*mask_2].sum())/(peak_response_map_1[j].sum()+peak_response_map_2[i].sum())
+            #         # # if peak_list_2[i][1] == peak_list_1[j][1] and flag:
+            #         # ab =(mask_1 * mask_2).sum()
+            #         if peak_list_2[i][1] == peak_list_1[j][1] and num>0.5:
+            #             # count+=1
+            #             # peak_list_sum.append(peak_list_1[j])
+            #             # peak_response_map_sum.append(np.squeeze(peak_response_map_1[j] + peak_response_map_2[i]))
+            #             # peak_response_map_1 = np.delete(peak_response_map_1, j, 0)
+            #             # peak_list_1 = np.delete(peak_list_1, j, 0)
+            #             peak_response_map_2 = np.delete(peak_response_map_2, i, 0)
+            #             peak_list_2 = np.delete(peak_list_2, i, 0)
+            #             i=i-1
+            #             break
+            #         j += 1
+            #     i = i+1
+################################################################
+            # print(count)
+            for i in range(len(peak_response_map_1)):
+                peak_list_sum.append(peak_list_1[i])
+                peak_response_map_sum.append(peak_response_map_1[i])
+                class_response_maps_sum.append(cr_1)
+            # count =0
+            for j in range(len(peak_response_map_2)):
+                # count+=1
+                peak_list_sum.append(peak_list_2[j])
+                peak_response_map_sum.append(peak_response_map_2[j])
+                class_response_maps_sum.append(cr_2)
+            # print(count)
+        else:
+            for j in range(len(peak_response_map_2)):
+                peak_list_sum.append(peak_list_2[j])
+                peak_response_map_sum.append(peak_response_map_2[j])
+                class_response_maps_sum.append(cr_2)
+            # peak_list_sum = None
+            # peak_response_map_sum = None
+    else:
+        none_picture = PIL.Image.fromarray(np.zeros((pack[2][1], pack[2][0])).astype('uint8'))
+        #none_picture.save("%s/prm_2/%s.png" % (args.save_path, img_name))
+        if instance_list1 is not None:
+            #########################-- three --#############################
+            img3 = img.detach().squeeze().cpu().numpy()
+            img3 = torch.from_numpy(img3).unsqueeze(0).cuda().requires_grad_()
+            #################################################################
+            for i in range(len(peak_response_map_1)):
+                peak_list_sum.append(peak_list_1[i])
+                peak_response_map_sum.append(peak_response_map_1[i])
+                class_response_maps_sum.append(cr_1)
+        else:
+            #########################-- three --#############################
+            img3 = PIL.Image.open(
+                "/home/zxforchid/Hu_Z/PRM-pytorch/demo/datasets/VOCdevkit/VOC2012/JPEGImages/%s.jpg" % (img_name))
+            img3 = transformer(img3).unsqueeze(0).cuda().requires_grad_()
+            #################################################################
+            peak_list_sum = None
+            peak_response_map_sum = None
+
+    # instance_list3 = model3(img3)
+    # instance_list3 = os.path.exists("%s/MAKE3/%s/1.npy" % (args.save_path, img_name))
+
+    # peak_list_sum_sum = []
+    # peak_response_map_sum_sum = []
+    # if instance_list3 is not None:
+    #     _1, class_response_maps_3, peak_list_3, peak_response_map_3 = instance_list3
+    #     peak_response_map_3 = peak_response_map_3.cpu().numpy()
+    #     peak_list_3 = peak_list_3.cpu().numpy()
+    #
+    #     cr = class_response_maps_3.cpu().numpy()
+    #     # np.save("%s/MAKE3/%s/1.npy" % (args.save_path, img_name), cr)
+    #     # np.save("%s/MAKE3/%s/2.npy" % (args.save_path, img_name), peak_response_map_3)
+    #     # np.save("%s/MAKE3/%s/3.npy" % (args.save_path, img_name), peak_list_3)
+    #
+    #     # class_response_maps_3 = np.load("%s/MAKE3/%s/1.npy" % (args.save_path, img_name))
+    #     # peak_list_3 = np.load("%s/MAKE3/%s/3.npy" % (args.save_path, img_name))
+    #     # peak_response_map_3 = np.load("%s/MAKE3/%s/2.npy" % (args.save_path, img_name))
+    #     # class_response_maps_3 = torch.from_numpy(class_response_maps_3).cuda()
+    #
+    #     sum_3 = model3.instance_seg(class_response_maps_3, torch.from_numpy(peak_list_3).cuda(),
+    #                                 torch.from_numpy(peak_response_map_3).cuda(),
+    #                                 dict(proposals=proposals, proposal_count=proposal_count,
+    #                                      param=(0.95, 1e-5, 0.8, 3e-6),
+    #                                      saliency_map=saliency_map))
+    #     vis = modules.prm_visualize(sum_3, class_names=data.CAT_LIST)
+    #     prm = PIL.Image.fromarray(imresize(vis[1], (pack[2][1], pack[2][0]), interp='bilinear'))
+    #     prm.save("%s/prm_3/%s.png" % (args.save_path, img_name))
+    #     ####################################################################
+    #     if peak_response_map_sum is not None:
+    #         class_response_maps = class_response_maps_1
+    #         #########################--- PRM ---#############################
+    #         # # count = 0
+    #         # i = 0
+    #         # j = 0
+    #         # while i < len(peak_response_map_3):
+    #         #     while j < len(peak_response_map_sum):
+    #         #         mask_1 = peak_response_map_sum[j]>peak_response_map_sum[j].mean()*ls
+    #         #         mask_2 = peak_response_map_3[i]>peak_response_map_3[i].mean()*ls
+    #         #         mask_sum = mask_1*mask_2
+    #         #         # mas_abs = mask_1*mask_2
+    #         #         # asd=np.squeeze(peak_response_map_1[j]*[mas_abs]+peak_response_map_2[i]*[mas_abs])
+    #         #         num = (peak_response_map_sum[j][mask_1*mask_2].sum()+peak_response_map_3[i][mask_1*mask_2].sum())/(peak_response_map_sum[j].sum()+peak_response_map_3[i].sum())
+    #         #         # # if peak_list_2[i][1] == peak_list_1[j][1] and flag:
+    #         #         # ab =(mask_1 * mask_2).sum()
+    #         #         if peak_list_3[i][1] == peak_list_sum[j][1] and num>0.8:
+    #         #             # count +=1
+    #         #             peak_list_sum_sum.append(peak_list_sum[j])
+    #         #             peak_response_map_sum_sum.append(np.squeeze(peak_response_map_sum[j] + peak_response_map_3[i]))
+    #         #             peak_response_map_sum = np.delete(peak_response_map_sum, j, 0)
+    #         #             peak_list_sum = np.delete(peak_list_sum, j, 0)
+    #         #             peak_response_map_3 = np.delete(peak_response_map_3, i, 0)
+    #         #             peak_list_3 = np.delete(peak_list_3, i, 0)
+    #         #             i=i-1
+    #         #             break
+    #         #         j += 1
+    #         #     i = i+1
+    #         ################################################################
+    #         # print(count)
+    #         for i in range(len(peak_list_sum)):
+    #             peak_list_sum_sum.append(peak_list_sum[i])
+    #             peak_response_map_sum_sum.append(peak_response_map_sum[i])
+    #         for j in range(len(peak_response_map_3)):
+    #             peak_list_sum_sum.append(peak_list_3[j])
+    #             peak_response_map_sum_sum.append(peak_response_map_3[j])
+    #     else:
+    #         class_response_maps = class_response_maps_3
+    #         for j in range(len(peak_response_map_3)):
+    #             peak_list_sum_sum.append(peak_list_3[j])
+    #             peak_response_map_sum_sum.append(peak_response_map_3[j])
+    #         # peak_list_sum_sum = None
+    #         # peak_response_map_sum_sum = None
+    # else:
+    #     if peak_list_sum is not None:
+    #         #########################-- three --#############################
+    #         img3 = img.detach().squeeze().cpu().numpy()
+    #         img3 = torch.from_numpy(img3).unsqueeze(0).cuda().requires_grad_()
+    #         #################################################################
+    #         class_response_maps = class_response_maps_1
+    #         for i in range(len(peak_list_sum)):
+    #             peak_list_sum_sum.append(peak_list_sum[i])
+    #             peak_response_map_sum_sum.append(peak_response_map_sum[i])
+    #     else:
+    #         peak_list_sum_sum = None
+    #         peak_response_map_sum_sum = None
+        ####################################################################
+
+    # if peak_list_sum_sum is not None:
+    if peak_list_sum is not None:
+        # point_map = np.zeros((14, 14), dtype = np.uint8)
+        # for i in range(len(peak_list_sum)):
+        #     point_map[peak_list_sum[i][2], peak_list_sum[i][3]] = 255
+        # point_map = PIL.Image.fromarray(imresize(point_map, (pack[2][1], pack[2][0]), interp='nearest'))
+        # point_map.save("%s/point/%s.png" % (args.save_path, img_name))
+
+        peak_list_sum = np.stack(peak_list_sum, 0)
+        peak_list_sum = torch.from_numpy(peak_list_sum).cuda()
+        peak_response_map_sum = np.stack(peak_response_map_sum, 0)
+        peak_response_map_sum = torch.from_numpy(peak_response_map_sum).cuda()
+        sum_list = model1.instance_seg(class_response_maps_sum, peak_list_sum, peak_response_map_sum, dict(proposals = proposals, proposal_count = proposal_count, param = para_list,
+                                                    saliency_map = saliency_map),img_name)
+        pred_label = []
+        pred_mask = []
+        pred_score = []
+        for i in range(len(sum_list)):
+            pred_score.append(1)
+            pred_label.append(sum_list[i]['category'])
+            pred_mask.append(imresize(sum_list[i]['mask'] * 1, (pack[2][1], pack[2][0]), interp='nearest') == 255)
+        numpy = {'score': np.stack(pred_score, 0),
+                 'mask': np.stack(pred_mask, 0),
+                 'class': np.stack(pred_label, 0)}
+        np.save("%s/1/%s.npy" % (args.save_path, img_name), numpy)
+
+        vis = modules.prm_visualize(sum_list, class_names=data.CAT_LIST)
+        instance_seg = PIL.Image.fromarray(imresize(vis[2], (pack[2][1], pack[2][0]), interp='nearest'))
+        semantic_seg = PIL.Image.fromarray(imresize(vis[0], (pack[2][1], pack[2][0]), interp='nearest'))
+        #prm = PIL.Image.fromarray(imresize(vis[1], (pack[2][1], pack[2][0]), interp='bilinear'))
+
+        instance_seg.putpalette(cmap)
+        semantic_seg.putpalette(cmap)
+
+        instance_seg.save("%s/instance_seg/%s.png" % (args.save_path, img_name))
+        semantic_seg.save("%s/semantic_seg/%s.png" % (args.save_path, img_name))
+        #prm.save("%s/prm/%s.png" % (args.save_path, img_name))
+    else:
+        print('No object detected')
+        none_picture = PIL.Image.fromarray(np.zeros((pack[2][1], pack[2][0])).astype('uint8'))
+        #none_picture.save("%s/instance_seg/%s.png" % (args.save_path, img_name))
+        #none_picture.save("%s/semantic_seg/%s.png" % (args.save_path, img_name))
+        #none_picture.save("%s/prm/%s.png" % (args.save_path, img_name))
+
+endtime = time.time()
+dtime = endtime - starttime
+print(starttime)
+print(endtime)
+print(dtime)
+parser = argparse.ArgumentParser()
+parser.add_argument("--chainer_eval_set", default="val", type=str)
+parser.add_argument("--voc12_root", default="/home/zxforchid/Hu_Z/PRM-pytorch/demo/datasets/VOCdevkit/VOC2012", type=str)
+parser.add_argument("--ins_seg_out_dir", default="/home/zxforchid/Hu_Z/pychram_PRM/COB_test_1/1", type=str)
+parser.add_argument('--save_path', dest='save_path', default='/home/zxforchid/Hu_Z/pychram_PRM/result/ins.txt', type=str)
+args_result = parser.parse_args()
+
+a,b,c,d = run(args_result)
+
+print('0.25iou:', a)
+print('0.5iou:', b)
+print('0.75iou:', c)
+print('abo:', d)
