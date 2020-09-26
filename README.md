@@ -26,3 +26,8 @@ prm_test.py
 ```Bash
 fu.py
 ```
+### Note
+parameters referred in the paper can be found in the 
+```Bash
+fu.py
+```
